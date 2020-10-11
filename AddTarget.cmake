@@ -1,7 +1,7 @@
 # Author: Marcin Serwach
 # License: MIT
 # ULR: https://github.com/iblis-ms/cmake_add_target
-#
+# 
 # AddTarget simpliefies adding targets in CMake. For example:
 ##################### <EXAMPLE> ########################
 #   set(SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -25,7 +25,50 @@
 ##################### </EXAMPLE> #######################
 
 # Set to 1 to print debug values
-set(ADD_TARGET_DEBUG 1)
+if (NOT DEFINED ADD_TARGET_DEBUG)
+    set(ADD_TARGET_DEBUG 1)
+endif ()
+
+# Set to 1 to run valgrind with test
+if (NOT DEFINED ADD_TARGET_VALGRIND)
+    set(ADD_TARGET_VALGRIND 0)
+endif ()
+
+# Set to 1 to run dr memory with test
+if (NOT DEFINED ADD_TARGET_DR_MEMORY)
+    set(ADD_TARGET_DR_MEMORY 0)
+endif ()
+
+# Set to 1 to run clang address sanitizer with test
+if (NOT DEFINED ADD_TARGET_CLANG_ADDRESS_SANITIZER)
+    set(ADD_TARGET_CLANG_ADDRESS_SANITIZER 0)
+endif ()
+
+if (NOT DEFINED ADD_TARGET_CLANG_MEMORY_SANITIZER)
+    set(ADD_TARGET_CLANG_MEMORY_SANITIZER 0)
+endif ()
+
+if (NOT DEFINED ADD_TARGET_CLANG_THREAD_SANITIZER)
+    set(ADD_TARGET_CLANG_THREAD_SANITIZER 0)
+endif ()
+
+if (NOT DEFINED ADD_TARGET_CLANG_UNDEFINED_BEHAVIOR_SANITIZER)
+    set(ADD_TARGET_CLANG_UNDEFINED_BEHAVIOR_SANITIZER 0)
+endif ()
+
+# custom test run command shall be done by defining addTargetTestRunCommand. See 
+
+include("${CMAKE_CURRENT_LIST_DIR}/conan.cmake")
+
+function(AddTargetTestRunCommand_Valgrind TEST_TARGET_NAME)
+    set(ADD_TARGET_TEST_COMMAND "valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes $<TARGET_FILE:${TEST_TARGET_NAME}>" PARENT_SCOPE)
+    set(ADD_TARGET_TEST_SHELL_COMMAND YES PARENT_SCOPE)
+endfunction()
+
+function(AddTargetTestRunCommand_DrMemory TEST_TARGET_NAME)
+    set(ADD_TARGET_TEST_COMMAND "drmemory" "--" "$<TARGET_FILE:${TEST_TARGET_NAME}>" PARENT_SCOPE)
+endfunction()
+
 
 # \brief Add files to groups for example to have groups in Visual Studio that match to folder structure.
 # \param[in] ROOT_PATH - Root path - groups will be created from this root path - the path given here is treaten as entry point.
@@ -79,6 +122,9 @@ function(AddTargetInternal)
         
         PUBLIC_DEFINES
         PRIVATE_DEFINES
+
+        RESOURCES_TO_COPY_TO_EXE_DIR
+        RESOURCES_TO_COPY
         )
   
     CMake_parse_arguments(ADD_TARGET "${OPTIONAL_ARGUMENTS_PATTERN}" "${ONE_ARGUMENT_PATTERN}" "${MULTI_ARGUMENT_PATTERN}" ${ARGN} )
@@ -104,10 +150,23 @@ function(AddTargetInternal)
         message(STATUS "--------------------------------------------------------------")
     endif ()
     
+    if (ADD_TARGET_TEST_TARGET)
+        if (ADD_TARGET_TEST_TARGET_INCLUDE)
+            if (NOT "${ADD_TARGET_TARGET_NAME}" MATCHES "${ADD_TARGET_TEST_TARGET_INCLUDE}")
+                message(STATUS "Target ${ADD_TARGET_TARGET_NAME} doesn't match to regex: ${ADD_TARGET_TEST_TARGET_INCLUDE}, so the test target wouldn't be built.")
+                return()
+            endif ()
+        endif ()
+        if (ADD_TARGET_TEST_TARGET_EXCLUDE)
+            if ("${ADD_TARGET_TARGET_NAME}" MATCHES "${ADD_TARGET_TEST_TARGET_EXCLUDE}")
+                message(STATUS "Target ${ADD_TARGET_TARGET_NAME} matches to regex: ${ADD_TARGET_TEST_TARGET_EXCLUDE}, so the test target wouldn't be built.")
+                return()
+            endif ()
+        endif ()
+    endif ()
     AddFileToGroupInternal("${ADD_TARGET_TARGET_DIR}" "${ADD_TARGET_PUBLIC_INC_DIRS}" PUBLIC_INCS_TO_SRC)
     AddFileToGroupInternal("${ADD_TARGET_TARGET_DIR}" "${ADD_TARGET_PRIVATE_INC_DIRS}" PRIVATE_INCS_TO_SRC)
-    message(STATUS "PUBLIC_INCS_TO_SRC=${PUBLIC_INCS_TO_SRC}")
-    message(STATUS "PRIVATE_INCS_TO_SRC=${PRIVATE_INCS_TO_SRC}")
+   
     source_group(TREE "${ADD_TARGET_TARGET_DIR}" FILES ${ADD_TARGET_SRC})
 
     set(SRC "${ADD_TARGET_SRC}" "${PUBLIC_INCS_TO_SRC}" "${PRIVATE_INCS_TO_SRC}" "${INTERFACE_INCS_TO_SRC}")
@@ -141,10 +200,139 @@ function(AddTargetInternal)
         target_compile_definitions("${ADD_TARGET_TARGET_NAME}" PRIVATE "${ADD_TARGET_PRIVATE_DEFINES}")
     endif()
     
-    if (TEST_TARGET)
-        add_test(NAME "${ADD_TARGET_TARGET_TYPE}" COMMAND "${ADD_TARGET_TARGET_TYPE}")
+    if (ADD_TARGET_TEST_TARGET)
+        set(ADD_TARGET_TEST_COMMAND "${ADD_TARGET_TARGET_NAME}")
+        if (COMMAND addTargetTestRunCommand)
+            AddTargetTestRunCommand("${ADD_TARGET_TARGET_NAME}")
+        else()
+            if (ADD_TARGET_VALGRIND)
+                AddTargetTestRunCommand_Valgrind("${ADD_TARGET_TARGET_NAME}")
+            endif ()
+
+            if (ADD_TARGET_DR_MEMORY)
+                AddTargetTestRunCommand_DrMemory("${ADD_TARGET_TARGET_NAME}")
+            endif ()
+        endif ()
+        if (ADD_TARGET_TEST_SHELL_COMMAND)
+            add_test(NAME "${ADD_TARGET_TARGET_NAME}" COMMAND sh -c "${ADD_TARGET_TEST_COMMAND}")
+        else()
+            add_test(NAME "${ADD_TARGET_TARGET_NAME}" COMMAND  "${ADD_TARGET_TEST_COMMAND}")
+        endif()
     endif()
-	
+    
+    set(CONAN_FILE_PATH "${ADD_TARGET_TARGET_DIR}/conanfile.txt")
+    if (EXISTS "${CONAN_FILE_PATH}")
+        file(RELATIVE_PATH CONAN_FILE_RELATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}" "${CONAN_FILE_PATH}") # conan_cmake_run requires relative path
+
+        # Note that build type, architecture is detected by CMake, but you can overwrite it
+        # see https://github.com/conan-io/cmake-conan for details
+        conan_cmake_run(CONANFILE "${CONAN_FILE_RELATIVE_PATH}"
+                        BASIC_SETUP         # calls conan_basic_setup: https://docs.conan.io/en/latest/reference/generators/cmake.html
+                        CMAKE_TARGETS       # to use modern CMake approach: target_* function
+                        BUILD missing)      # build library if missing 
+        message(STATUS "Libraries taken via Conan.io: ${CONAN_TARGETS}")
+        target_link_libraries("${ADD_TARGET_TARGET_NAME}" PUBLIC  ${CONAN_TARGETS})
+    endif()
+    
+    if (ADD_TARGET_CLANG_ADDRESS_SANITIZER)
+        target_link_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=address" "-fno-omit-frame-pointer")
+        target_compile_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=address" "-fno-omit-frame-pointer")
+    endif()
+    if (ADD_TARGET_CLANG_MEMORY_SANITIZER)
+        target_link_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=memory" "-fno-omit-frame-pointer" "-fno-optimize-sibling-calls")
+        target_compile_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=memory" "-fno-omit-frame-pointer" "-fno-optimize-sibling-calls")
+    endif()
+    if (ADD_TARGET_CLANG_THREAD_SANITIZER)
+        target_link_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=thread" "-fno-omit-frame-pointer")
+        target_compile_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=thread" "-fno-omit-frame-pointer")
+    endif()
+    if (ADD_TARGET_CLANG_UNDEFINED_BEHAVIOR_SANITIZER)
+        target_link_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=undefined")
+        target_compile_options("${ADD_TARGET_TARGET_NAME}" PUBLIC "-fsanitize=undefined")
+    endif()
+
+    list(APPEND LIBS ${ADD_TARGET_PUBLIC_LIBS} ${ADD_TARGET_PRIVATE_LIBS})
+    foreach(LIB IN LISTS LIBS)
+        get_target_property(LIB_RESOURCES_TO_COPY_TO_EXE_DIR ${LIB} RESOURCES_TO_COPY_TO_EXE_DIR)
+        if (LIB_RESOURCES_TO_COPY_TO_EXE_DIR)
+            list(APPEND ADD_TARGET_RESOURCES_TO_COPY_TO_EXE_DIR ${LIB_RESOURCES_TO_COPY_TO_EXE_DIR})
+        endif()
+        get_target_property(LIB_RESOURCES_TO_COPY ${LIB} RESOURCES_TO_COPY)
+        if (LIB_RESOURCES_TO_COPY)
+            list(APPEND ADD_TARGET_RESOURCES_TO_COPY ${LIB_RESOURCES_TO_COPY})
+        endif()
+    endforeach()
+
+    set_target_properties(${ADD_TARGET_TARGET_NAME} PROPERTIES 
+        RESOURCES_TO_COPY_TO_EXE_DIR "${ADD_TARGET_RESOURCES_TO_COPY_TO_EXE_DIR}"
+        RESOURCES_TO_COPY "${ADD_TARGET_RESOURCES_TO_COPY}"
+        )
+
+    if("${ADD_TARGET_TARGET_TYPE}" STREQUAL "EXE")
+        get_target_property(LIB_RESOURCES_TO_COPY_TO_EXE_DIR ${ADD_TARGET_TARGET_NAME} RESOURCES_TO_COPY_TO_EXE_DIR)
+        if (LIB_RESOURCES_TO_COPY_TO_EXE_DIR)
+            foreach(RES IN LISTS LIB_RESOURCES_TO_COPY_TO_EXE_DIR)
+
+                if (NOT EXISTS "${RES}")
+                    message(FATAL "Resource ${RES} not exists.")
+                else()
+                    if (IS_DIRECTORY "${RES}")
+                        get_filename_component(DIR_NAME "${RES}" NAME_WE)
+                        add_custom_command(TARGET ${ADD_TARGET_TARGET_NAME} POST_BUILD
+                            COMMAND ${CMAKE_COMMAND} -E copy_directory 
+                                "${RES}" 
+                                "$<TARGET_FILE_DIR:${ADD_TARGET_TARGET_NAME}>/${DIR_NAME}")  # copy_directory copies content without folder, so folder needs to be added to destination path
+                    else ()
+                        add_custom_command(TARGET ${ADD_TARGET_TARGET_NAME} POST_BUILD
+                            COMMAND ${CMAKE_COMMAND} -E copy
+                                "${RES}" 
+                                "$<TARGET_FILE_DIR:${ADD_TARGET_TARGET_NAME}>")  
+
+                    endif ()
+                endif ()
+            endforeach()
+        endif()
+
+        get_target_property(LIB_RESOURCES_TO_COPY_WITH_DEST ${ADD_TARGET_TARGET_NAME} RESOURCES_TO_COPY)
+        if (LIB_RESOURCES_TO_COPY_WITH_DEST)
+            list(LENGTH LIB_RESOURCES_TO_COPY_WITH_DEST RES_LIST_LENGTH)
+
+            math(EXPR CHECK_LENGTH "${RES_LIST_LENGTH}%3")
+            if (NOT "${CHECK_LENGTH}" STREQUAL "0")
+                message(FATAL "Incorrect format of RESOURCES_TO_COPY values. Expected \"src TO dest\".")
+            endif ()
+            foreach (KEYWORD_INDEX RANGE 1 ${RES_LIST_LENGTH} 3) # RANGE start stop step
+
+                math(EXPR INDEX "${KEYWORD_INDEX}-1")
+                list(GET LIB_RESOURCES_TO_COPY_WITH_DEST ${INDEX} SRC)
+
+                list(GET LIB_RESOURCES_TO_COPY_WITH_DEST ${KEYWORD_INDEX} KEYWORD)
+
+                math(EXPR DEST_INDEX "${KEYWORD_INDEX}+1")
+                list(GET LIB_RESOURCES_TO_COPY_WITH_DEST ${DEST_INDEX} DEST)
+
+                if (NOT "${KEYWORD}" STREQUAL "TO")
+                    message(FATAL "Incorrect key for RESOURCES_TO_COPY in target: ${ADD_TARGET_TARGET_NAME} after item: ${SRC}")
+                endif()
+                if (IS_DIRECTORY "${SRC}")
+                    get_filename_component(DIR_NAME "${SRC}" NAME_WE)
+                    add_custom_command(TARGET ${ADD_TARGET_TARGET_NAME} POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory 
+                            "${SRC}" 
+                            "${DEST}/${DIR_NAME}")  
+                else ()
+                    add_custom_command(TARGET ${ADD_TARGET_TARGET_NAME} POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy
+                            "${SRC}" 
+                            "${DEST}")  
+
+                endif ()
+
+            endforeach ()
+        endif()
+
+    endif()
+        
 endfunction()
 
 # \brief Creates target.
@@ -161,7 +349,7 @@ endfunction()
 macro(AddTarget)
 
     AddTargetInternal(TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ${ARGV})
-	
+    
 endmacro()
 
 # \brief Creates test target.
@@ -178,5 +366,5 @@ endmacro()
 macro(AddTestTarget)
 
     AddTargetInternal(TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ${ARGV} TEST_TARGET)
-	
+    
 endmacro()
